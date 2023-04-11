@@ -569,6 +569,25 @@ class MCU_adc:
         if self._callback is not None:
             self._callback(last_read_time, last_value)
 
+class FastCommandWrapper:
+    def __init__(self, mcu, cmd_id, cmd_queue, queue_msg_fn):
+        self._mcu = mcu
+        self._cmd_id = cmd_id
+        if not cmd_queue:
+            cmd_queue = alloc_command_queue(
+                uses_move_queue=True, high_throughput=True
+            )
+        self._sync_channel_obj = cmd_queue
+        self._queue_msg_fn = queue_msg_fn
+        self._reactor = mcu.get_printer().get_reactor()
+        self._toolhead = mcu.get_printer().lookup_object('toolhead')
+    def send(self, data, minclock, reqclock):
+        data.insert(0, self._cmd_id)
+        self._queue_msg_fn(self._sync_channel_obj, data, len(data), reqclock)
+        print_time = self._mcu.clock_to_print_time(reqclock)
+        # TODO: Is here actually `_async_` needed?
+        self._reactor.register_async_callback(
+            lambda ev: self._toolhead.note_synchronous_command(print_time))            
 
 ######################################################################
 # Main MCU class
