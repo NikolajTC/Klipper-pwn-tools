@@ -621,12 +621,18 @@ class MCU:
         self._init_cmds = []
         self._mcu_freq = 0.
         # Move command queuing
-        ffi_main, self._ffi_lib = chelper.get_ffi()
+        self._ffi_main, self._ffi_lib = chelper.get_ffi()
         self._max_stepper_error = config.getfloat('max_stepper_error', 0.000025,
                                                   minval=0.)
         self._reserved_move_slots = 0
         self._stepqueues = []
         self._steppersync = None
+        
+                #
+        self._sync_channels = []
+        self._active_ht_queues = 0
+        #
+        
         # Stats
         self._get_status_info = {}
         self._stats_sumsq_base = 0.
@@ -790,10 +796,12 @@ class MCU:
             raise error("Too few moves available on MCU '%s'" % (self._name,))
         ffi_main, ffi_lib = chelper.get_ffi()
         self._steppersync = ffi_main.gc(
-            ffi_lib.steppersync_alloc(self._serial.get_serialqueue(),
-                                      self._stepqueues, len(self._stepqueues),
-                                      move_count-self._reserved_move_slots),
-            ffi_lib.steppersync_free)
+        ffi_lib.steppersync_alloc(self._serial.get_serialqueue(),
+                      self._stepqueues, len(self._stepqueues),
+                      self._sync_channels, len(self._sync_channels),
+                      move_count-self._reserved_move_slots),
+        ffi_lib.steppersync_free
+        )       
         ffi_lib.steppersync_set_time(self._steppersync, 0., self._mcu_freq)
         # Log config information
         move_msg = "Configured MCU '%s' (%d moves)" % (self._name, move_count)
@@ -877,6 +885,8 @@ class MCU:
         return self.print_time_to_clock(t) + slot
     def register_stepqueue(self, stepqueue):
         self._stepqueues.append(stepqueue)
+    def register_sync_channel(self, sync_channel):
+        self._sync_channels.append(sync_channel)
     def request_move_queue_slot(self):
         self._reserved_move_slots += 1
     def seconds_to_clock(self, time):
@@ -890,10 +900,37 @@ class MCU:
         return self._name
     def register_response(self, cb, msg, oid=None):
         self._serial.register_response(cb, msg, oid)
-    def alloc_command_queue(self):
-        return self._serial.alloc_command_queue()
-    def lookup_command(self, msgformat, cq=None):
-        return CommandWrapper(self._serial, msgformat, cq)
+       def alloc_command_queue(self, uses_move_queue=False, high_throughput=False):
+        if high_throughput:
+            if not uses_move_queue:
+                raise error (
+                    "high throughput mode only works with move_queue items!"
+                )
+            if self._active_ht_queues > 0:
+                raise error (
+                    "Currently, only one high throughput pin "
+                    "is currently supported!"
+                )
+            self._active_ht_queues = self._active_ht_queues + 1
+            cq = self._ffi_main.gc(
+                self._ffi_lib.sync_channel_alloc(),
+                self._ffi_lib.sync_channel_free)
+            self.register_sync_channel(cq)
+            return cq
+        else:
+            # TODO: Automatically determine command's usage of move queue
+            if uses_move_queue:
+                self.request_move_queue_slot()
+            return self._serial.alloc_command_queue()
+
+    def lookup_command(self, msgformat, cq=None, high_throughput=False):
+        if high_throughput:
+            return FastCommandWrapper(self, self.lookup_command_tag(msgformat),
+                                      cq,
+                                      self._ffi_lib.sync_channel_queue_msg)
+        else:
+            return CommandWrapper(self._serial, msgformat, cq)
+        
     def lookup_query_command(self, msgformat, respformat, oid=None,
                              cq=None, is_async=False):
         return CommandQueryWrapper(self._serial, msgformat, respformat, oid,
