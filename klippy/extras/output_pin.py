@@ -38,10 +38,10 @@ class PrinterOutputPin:
             self.mcu_pin.setup_start_value(
                 self.last_value, self.last_value, True)
         else:
-             if config.getboolean('high_throughput', False):
-             self.mcu_pin.setup_high_throughput_mode()
-             self._pin_min_time = self.default_cycle_time
-                
+            if config.getboolean('high_throughput', False):
+                self.mcu_pin.setup_high_throughput_mode()
+                self._pin_min_time = self.default_cycle_time
+
             max_mcu_duration = config.getfloat('maximum_mcu_duration', 0.,
                                                minval=0.500,
                                                maxval=MAX_SCHEDULE_TIME)
@@ -63,7 +63,7 @@ class PrinterOutputPin:
         return {'value': self.last_value}
     def _set_pin(self, print_time, value, cycle_time, is_resend=False):
         if value == self.last_value and cycle_time == self.last_cycle_time:
-        if not is_resend or value == self.shutdown_value:
+            if not is_resend or value == self.shutdown_value:
                 return
         print_time = max(print_time, self.last_print_time + self._pin_min_time)
         if self.is_pwm:
@@ -97,7 +97,7 @@ class PrinterOutputPin:
         systime = self.reactor.monotonic()
         print_time = self.mcu_pin.get_mcu().estimated_print_time(systime)
         time_diff = (self.last_print_time + self.resend_interval) - print_time
-      
+
         if time_diff > 0.:
             # Reschedule for resend time
             return systime + time_diff
