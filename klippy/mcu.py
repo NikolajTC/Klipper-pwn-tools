@@ -1,6 +1,6 @@
 # Interface to Klipper micro-controller code
 #
-# Copyright (C) 2016-2023  Kevin O'Connor <kevin@koconnor.net>
+# Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import sys, os, zlib, logging, math
@@ -8,94 +8,6 @@ import serialhdl, msgproto, pins, chelper, clocksync
 
 class error(Exception):
     pass
-
-
-######################################################################
-# Command transmit helper classes
-######################################################################
-
-# Class to retry sending of a query command until a given response is received
-class RetryAsyncCommand:
-    TIMEOUT_TIME = 5.0
-    RETRY_TIME = 0.500
-    def __init__(self, serial, name, oid=None):
-        self.serial = serial
-        self.name = name
-        self.oid = oid
-        self.reactor = serial.get_reactor()
-        self.completion = self.reactor.completion()
-        self.min_query_time = self.reactor.monotonic()
-        self.serial.register_response(self.handle_callback, name, oid)
-    def handle_callback(self, params):
-        if params['#sent_time'] >= self.min_query_time:
-            self.min_query_time = self.reactor.NEVER
-            self.reactor.async_complete(self.completion, params)
-    def get_response(self, cmds, cmd_queue, minclock=0, reqclock=0):
-        cmd, = cmds
-        self.serial.raw_send_wait_ack(cmd, minclock, reqclock, cmd_queue)
-        first_query_time = query_time = self.reactor.monotonic()
-        while 1:
-            params = self.completion.wait(query_time + self.RETRY_TIME)
-            if params is not None:
-                self.serial.register_response(None, self.name, self.oid)
-                return params
-            query_time = self.reactor.monotonic()
-            if query_time > first_query_time + self.TIMEOUT_TIME:
-                self.serial.register_response(None, self.name, self.oid)
-                raise serialhdl.error("Timeout on wait for '%s' response"
-                                      % (self.name,))
-            self.serial.raw_send(cmd, minclock, minclock, cmd_queue)
-
-# Wrapper around query commands
-class CommandQueryWrapper:
-    def __init__(self, serial, msgformat, respformat, oid=None,
-                 cmd_queue=None, is_async=False, error=serialhdl.error):
-        self._serial = serial
-        self._cmd = serial.get_msgparser().lookup_command(msgformat)
-        serial.get_msgparser().lookup_command(respformat)
-        self._response = respformat.split()[0]
-        self._oid = oid
-        self._error = error
-        self._xmit_helper = serialhdl.SerialRetryCommand
-        if is_async:
-            self._xmit_helper = RetryAsyncCommand
-        if cmd_queue is None:
-            cmd_queue = serial.get_default_command_queue()
-        self._cmd_queue = cmd_queue
-    def _do_send(self, cmds, minclock, reqclock):
-        xh = self._xmit_helper(self._serial, self._response, self._oid)
-        reqclock = max(minclock, reqclock)
-        try:
-            return xh.get_response(cmds, self._cmd_queue, minclock, reqclock)
-        except serialhdl.error as e:
-            raise self._error(str(e))
-    def send(self, data=(), minclock=0, reqclock=0):
-        return self._do_send([self._cmd.encode(data)], minclock, reqclock)
-    def send_with_preface(self, preface_cmd, preface_data=(), data=(),
-                          minclock=0, reqclock=0):
-        cmds = [preface_cmd._cmd.encode(preface_data), self._cmd.encode(data)]
-        return self._do_send(cmds, minclock, reqclock)
-
-# Wrapper around command sending
-class CommandWrapper:
-    def __init__(self, serial, msgformat, cmd_queue=None):
-        self._serial = serial
-        msgparser = serial.get_msgparser()
-        self._cmd = msgparser.lookup_command(msgformat)
-        if cmd_queue is None:
-            cmd_queue = serial.get_default_command_queue()
-        self._cmd_queue = cmd_queue
-        self._msgtag = msgparser.lookup_msgtag(msgformat) & 0xffffffff
-    def send(self, data=(), minclock=0, reqclock=0):
-        cmd = self._cmd.encode(data)
-        self._serial.raw_send(cmd, minclock, reqclock, self._cmd_queue)
-    def get_command_tag(self):
-        return self._msgtag
-
-
-######################################################################
-# Wrapper classes for MCU pins
-######################################################################
 
 class MCU_trsync:
     REASON_ENDSTOP_HIT = 1
@@ -152,13 +64,11 @@ class MCU_trsync:
         self._stepper_stop_cmd = mcu.lookup_command(
             "stepper_stop_on_trigger oid=%c trsync_oid=%c", cq=self._cmd_queue)
         # Create trdispatch_mcu object
-        set_timeout_tag = mcu.lookup_command(
-            "trsync_set_timeout oid=%c clock=%u").get_command_tag()
-        trigger_cmd = mcu.lookup_command("trsync_trigger oid=%c reason=%c")
-        trigger_tag = trigger_cmd.get_command_tag()
-        state_cmd = mcu.lookup_command(
+        set_timeout_tag = mcu.lookup_command_tag(
+            "trsync_set_timeout oid=%c clock=%u")
+        trigger_tag = mcu.lookup_command_tag("trsync_trigger oid=%c reason=%c")
+        state_tag = mcu.lookup_command_tag(
             "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u")
-        state_tag = state_cmd.get_command_tag()
         ffi_main, ffi_lib = chelper.get_ffi()
         self._trdispatch_mcu = ffi_main.gc(ffi_lib.trdispatch_mcu_alloc(
             self._trdispatch, mcu._serial.get_serialqueue(), # XXX
@@ -384,7 +294,7 @@ class MCU_pwm:
         self._last_clock = self._last_cycle_ticks = 0
         self._pwm_max = 0.
         self._set_cmd = self._set_cycle_ticks = None
-        
+
     def get_mcu(self):
         return self._mcu
     def setup_max_duration(self, max_duration):
@@ -414,7 +324,7 @@ class MCU_pwm:
         mdur_ticks = self._mcu.seconds_to_clock(self._max_duration)
         if mdur_ticks >= 1<<31:
             raise pins.error("PWM pin max duration too large")
-        self._min_clock_diff = cycle_ticks    
+        self._min_clock_diff = cycle_ticks
         if self._hardware_pwm:
             self._pwm_max = self._mcu.get_constant_float("PWM_MAX")
             if self._is_static:
@@ -427,6 +337,7 @@ class MCU_pwm:
             cmd_queue = self._mcu.alloc_command_queue(
                 uses_move_queue=True, high_throughput=self._is_ht
             )
+
             self._mcu.add_config_cmd(
                 "config_pwm_out oid=%d pin=%s cycle_ticks=%d value=%d"
                 " default_value=%d max_duration=%d"
@@ -472,7 +383,7 @@ class MCU_pwm:
             high_throughput=self._is_ht)
         self._set_cycle_ticks = self._mcu.lookup_command(
             "set_digital_out_pwm_cycle oid=%c cycle_ticks=%u", cq=cmd_queue,
-            high_throughput=self._is_ht)    # this is a lie    
+            high_throughput=self._is_ht)    # this is a lie
     def set_pwm(self, print_time, value, cycle_time=None):
         req_clock = self._mcu.print_time_to_clock(print_time)
         minclock = self._last_clock
@@ -483,7 +394,7 @@ class MCU_pwm:
             value = 1. - value
         if self._hardware_pwm:
             v = int(max(0., min(1., value)) * self._pwm_max + 0.5)
-                      self._set_cmd.send([self._oid, clock & 0xFFFFFFFF, v],
+            self._set_cmd.send([self._oid, clock & 0xFFFFFFFF, v],
                                 minclock=minclock, reqclock=clock)
         else:
             # Soft pwm update
@@ -507,7 +418,7 @@ class MCU_pwm:
 
             on_ticks = int(max(0., min(1., value)) * float(cycle_ticks) + 0.5)
             self._set_cmd.send([self._oid, clock & 0xFFFFFFFF, on_ticks],
-                                     minclock=minclock, reqclock=clock)
+                               minclock=minclock, reqclock=clock)
 
         self._last_clock = clock
 
@@ -569,6 +480,80 @@ class MCU_adc:
         if self._callback is not None:
             self._callback(last_read_time, last_value)
 
+# Class to retry sending of a query command until a given response is received
+class RetryAsyncCommand:
+    TIMEOUT_TIME = 5.0
+    RETRY_TIME = 0.500
+    def __init__(self, serial, name, oid=None):
+        self.serial = serial
+        self.name = name
+        self.oid = oid
+        self.reactor = serial.get_reactor()
+        self.completion = self.reactor.completion()
+        self.min_query_time = self.reactor.monotonic()
+        self.serial.register_response(self.handle_callback, name, oid)
+    def handle_callback(self, params):
+        if params['#sent_time'] >= self.min_query_time:
+            self.min_query_time = self.reactor.NEVER
+            self.reactor.async_complete(self.completion, params)
+    def get_response(self, cmds, cmd_queue, minclock=0, reqclock=0):
+        cmd, = cmds
+        self.serial.raw_send_wait_ack(cmd, minclock, reqclock, cmd_queue)
+        first_query_time = query_time = self.reactor.monotonic()
+        while 1:
+            params = self.completion.wait(query_time + self.RETRY_TIME)
+            if params is not None:
+                self.serial.register_response(None, self.name, self.oid)
+                return params
+            query_time = self.reactor.monotonic()
+            if query_time > first_query_time + self.TIMEOUT_TIME:
+                self.serial.register_response(None, self.name, self.oid)
+                raise serialhdl.error("Timeout on wait for '%s' response"
+                                      % (self.name,))
+            self.serial.raw_send(cmd, minclock, minclock, cmd_queue)
+
+# Wrapper around query commands
+class CommandQueryWrapper:
+    def __init__(self, serial, msgformat, respformat, oid=None,
+                 cmd_queue=None, is_async=False, error=serialhdl.error):
+        self._serial = serial
+        self._cmd = serial.get_msgparser().lookup_command(msgformat)
+        serial.get_msgparser().lookup_command(respformat)
+        self._response = respformat.split()[0]
+        self._oid = oid
+        self._error = error
+        self._xmit_helper = serialhdl.SerialRetryCommand
+        if is_async:
+            self._xmit_helper = RetryAsyncCommand
+        if cmd_queue is None:
+            cmd_queue = serial.get_default_command_queue()
+        self._cmd_queue = cmd_queue
+    def _do_send(self, cmds, minclock, reqclock):
+        xh = self._xmit_helper(self._serial, self._response, self._oid)
+        reqclock = max(minclock, reqclock)
+        try:
+            return xh.get_response(cmds, self._cmd_queue, minclock, reqclock)
+        except serialhdl.error as e:
+            raise self._error(str(e))
+    def send(self, data=(), minclock=0, reqclock=0):
+        return self._do_send([self._cmd.encode(data)], minclock, reqclock)
+    def send_with_preface(self, preface_cmd, preface_data=(), data=(),
+                          minclock=0, reqclock=0):
+        cmds = [preface_cmd._cmd.encode(preface_data), self._cmd.encode(data)]
+        return self._do_send(cmds, minclock, reqclock)
+
+# Wrapper around command sending
+class CommandWrapper:
+    def __init__(self, serial, msgformat, cmd_queue=None):
+        self._serial = serial
+        self._cmd = serial.get_msgparser().lookup_command(msgformat)
+        if cmd_queue is None:
+            cmd_queue = serial.get_default_command_queue()
+        self._cmd_queue = cmd_queue
+    def send(self, data=(), minclock=0, reqclock=0):
+        cmd = self._cmd.encode(data)
+        self._serial.raw_send(cmd, minclock, reqclock, self._cmd_queue)
+
 class FastCommandWrapper:
     def __init__(self, mcu, cmd_id, cmd_queue, queue_msg_fn):
         self._mcu = mcu
@@ -587,11 +572,7 @@ class FastCommandWrapper:
         print_time = self._mcu.clock_to_print_time(reqclock)
         # TODO: Is here actually `_async_` needed?
         self._reactor.register_async_callback(
-            lambda ev: self._toolhead.note_synchronous_command(print_time))            
-
-######################################################################
-# Main MCU class
-######################################################################
+            lambda ev: self._toolhead.note_synchronous_command(print_time))
 
 class MCU:
     error = error
@@ -646,12 +627,12 @@ class MCU:
         self._reserved_move_slots = 0
         self._stepqueues = []
         self._steppersync = None
-        
-                #
+
+        #
         self._sync_channels = []
         self._active_ht_queues = 0
         #
-        
+
         # Stats
         self._get_status_info = {}
         self._stats_sumsq_base = 0.
@@ -815,12 +796,13 @@ class MCU:
             raise error("Too few moves available on MCU '%s'" % (self._name,))
         ffi_main, ffi_lib = chelper.get_ffi()
         self._steppersync = ffi_main.gc(
-        ffi_lib.steppersync_alloc(self._serial.get_serialqueue(),
-                      self._stepqueues, len(self._stepqueues),
-                      self._sync_channels, len(self._sync_channels),
-                      move_count-self._reserved_move_slots),
-        ffi_lib.steppersync_free
-        )       
+            ffi_lib.steppersync_alloc(self._serial.get_serialqueue(),
+                              self._stepqueues, len(self._stepqueues),
+                              self._sync_channels, len(self._sync_channels),
+                              move_count-self._reserved_move_slots),
+            ffi_lib.steppersync_free
+        )
+
         ffi_lib.steppersync_set_time(self._steppersync, 0., self._mcu_freq)
         # Log config information
         move_msg = "Configured MCU '%s' (%d moves)" % (self._name, move_count)
@@ -919,7 +901,7 @@ class MCU:
         return self._name
     def register_response(self, cb, msg, oid=None):
         self._serial.register_response(cb, msg, oid)
-       def alloc_command_queue(self, uses_move_queue=False, high_throughput=False):
+    def alloc_command_queue(self, uses_move_queue=False, high_throughput=False):
         if high_throughput:
             if not uses_move_queue:
                 raise error (
@@ -949,7 +931,7 @@ class MCU:
                                       self._ffi_lib.sync_channel_queue_msg)
         else:
             return CommandWrapper(self._serial, msgformat, cq)
-        
+
     def lookup_query_command(self, msgformat, respformat, oid=None,
                              cq=None, is_async=False):
         return CommandQueryWrapper(self._serial, msgformat, respformat, oid,
@@ -959,6 +941,9 @@ class MCU:
             return self.lookup_command(msgformat)
         except self._serial.get_msgparser().error as e:
             return None
+    def lookup_command_tag(self, msgformat):
+        all_msgs = self._serial.get_msgparser().get_messages()
+        return {fmt: msgtag for msgtag, msgtype, fmt in all_msgs}[msgformat]
     def get_enumerations(self):
         return self._serial.get_msgparser().get_enumerations()
     def get_constants(self):
