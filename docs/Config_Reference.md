@@ -2971,11 +2971,14 @@ pin:
 #   The amount of time (in seconds) per PWM cycle. It is recommended
 #   this be 10 milliseconds or greater when using software based PWM.
 #   The default is 0.100 seconds for pwm pins.
-#hardware_pwm: False
-#   Enable this to use hardware PWM instead of software PWM. When
-#   using hardware PWM the actual cycle time is constrained by the
-#   implementation and may be significantly different than the
-#   requested cycle_time. The default is False.
+high_throughput: False
+#   This enables the high throughput mode for using e.g. PWM
+#   controlled tools (see docs/Using_PWM_Tools.md)
+#   Suggested to only use on one output pin, currently.
+#   Warning: Setting a maximum_mcu_duration will _not_ yet
+#   split long running moves.
+#   This will lead to a shutdown if individual moves
+#   do run longer in high throughput mode.
 #scale:
 #   This parameter can be used to alter how the 'value' and
 #   'shutdown_value' parameters are interpreted for pwm pins. If
